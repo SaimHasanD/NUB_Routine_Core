@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+frontend/node_modules/
+dist/
+.env
+.vscode/
+.idea/
+*.log
+.DS_Store
+Thumbs.db
+Plan And Architecture.md
+Architecture.svg
+backend/test_data/
+frontend/test_download.cjs
+backend/data/*.xlsx
+junk/
