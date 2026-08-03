@@ -2,20 +2,22 @@ import base64
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, File, UploadFile, HTTPException, Form
+from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Depends
 
 try:
     from .shared import (
         ADMIN_PASSWORD, GEMINI_API_KEY, SUPABASE_BUCKET,
         EXAM_SCHEDULE_FILENAME, supabase_client, logger,
     )
-    from .state import get_state
+    from .db.database import get_db
+    from .db.models import Semester, Group, ClassRoutine, Course
 except ImportError:
     from shared import (
         ADMIN_PASSWORD, GEMINI_API_KEY, SUPABASE_BUCKET,
         EXAM_SCHEDULE_FILENAME, supabase_client, logger,
     )
-    from state import get_state
+    from db.database import get_db
+    from db.models import Semester, Group, ClassRoutine, Course
 
 router = APIRouter()
 
@@ -118,26 +120,21 @@ def _assemble_schedule(header_map: dict, rows: list[dict]) -> list[dict]:
     return schedule
 
 
-def _lookup_semester(course_code: str | dict, index: dict) -> int | None:
-    """
-    Search all groups in the in-memory routine index for the given course_code.
-    Return the semester number from the group ID's leading digit (e.g. '1B' -> 1),
-    or None if not found. Group IDs always share the same courses within a
-    semester (1A-1F etc.), so the first match is authoritative.
-    """
+def _lookup_semester_db(course_code: str | dict, db, semester_id) -> int | None:
     import re
-
     if isinstance(course_code, dict):
         course_code = course_code.get("code", "")
-
     normalized = re.sub(r"\s+", " ", course_code.strip().upper())
-    for group_id, entries in index.items():
-        for entry in entries:
-            ec = re.sub(r"\s+", " ", (entry.get("course_code") or "").strip().upper())
-            if ec == normalized:
-                m = re.search(r"^(\d+)", group_id)
-                if m:
-                    return int(m.group(1))
+    
+    cr = db.query(ClassRoutine).join(Course).join(Group).filter(
+        ClassRoutine.semester_id == semester_id,
+        Course.course_code.ilike(f"%{normalized}%")
+    ).first()
+    
+    if cr and cr.group_id:
+        g = db.query(Group).get(cr.group_id)
+        if g:
+            return g.academic_semester
     return None
 
 
@@ -189,6 +186,7 @@ def _dedupe_and_validate(exam_entries: list[dict]) -> tuple[list[dict], list[str
 async def upload_exam_schedule(
     file: UploadFile = File(...),
     password: str = Form(""),
+    db = Depends(get_db)
 ):
     """Admin-only. Accept a JPG/PNG exam schedule image, extract structured JSON
     via Gemini Vision, validate/dedupe in code, enrich with semester numbers,
@@ -261,17 +259,15 @@ async def upload_exam_schedule(
     for w in extraction_warnings:
         logger.warning(f"Exam extraction warning: {w}")
 
-    # ── Enrich with semester numbers from in-memory routine ────────────────
-    state = await get_state()
-    routine_index = state.get("index", {})
-
-    if not routine_index:
-        raise HTTPException(409, "Routine not loaded — wait a moment and retry.")
+    # ── Enrich with semester numbers from DB ────────────────
+    semester = db.query(Semester).order_by(Semester.created_at.desc()).first()
+    if not semester:
+        raise HTTPException(409, "Semester not loaded — wait a moment and retry.")
 
     for entry in exam_entries:
         enriched_courses = []
         for course_code in (entry.get("courses") or []):
-            sem = _lookup_semester(course_code, routine_index)
+            sem = _lookup_semester_db(course_code, db, semester.id)
             enriched_courses.append({"code": course_code, "semester": sem})
         entry["courses"] = enriched_courses
 

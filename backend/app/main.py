@@ -1,27 +1,23 @@
 import os
+import shutil
+import tempfile
 from pathlib import Path
-from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
 env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
-import shutil
-import tempfile
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
 
+# Local imports
 try:
-    from .models import UploadResponse, GroupRoutineResponse, ScheduleEntry, Teacher
+    from .models import UploadResponse, GroupRoutineResponse, ScheduleEntry as SchemaScheduleEntry
 except ImportError:
-    from models import UploadResponse, GroupRoutineResponse, ScheduleEntry, Teacher
-
-try:
-    from .state import set_state, get_state, is_loaded, get_routine_meta
-except ImportError:
-    from state import set_state, get_state, is_loaded, get_routine_meta
+    from models import UploadResponse, GroupRoutineResponse, ScheduleEntry as SchemaScheduleEntry
 
 try:
     from . import parse_excel
@@ -39,33 +35,36 @@ except ImportError:
     from exam import router as exam_router
 
 try:
-    from .time_utils import normalize_to_24h, to_12h_format, merge_consecutive_entries
+    from .time_utils import normalize_to_24h, merge_consecutive_entries
 except ImportError:
-    from time_utils import normalize_to_24h, to_12h_format, merge_consecutive_entries
+    from time_utils import normalize_to_24h, merge_consecutive_entries
 
-# Default file paths for initial auto-load (fallback if no uploaded routine exists)
-DEFAULT_ROUTINE_PATHS = [
-    os.environ.get("ROUTINE_FILE_PATH", ""),
-    str(Path(__file__).resolve().parent.parent / "test_data" / "Version_1_ ECSE Class Routine Summer 2025.xlsx"),
-    str(Path(__file__).resolve().parent.parent.parent / "Version_1_ ECSE Class Routine Summer 2025.xlsx"),
-]
+try:
+    from .db.database import engine, get_db, Base
+except ImportError:
+    from db.database import engine, get_db, Base
 
+try:
+    from .db.models import Department, Semester, Group, Teacher, Room, TimeSlot, Course, ClassRoutine, OnlineClass
+except ImportError:
+    from db.models import Department, Semester, Group, Teacher, Room, TimeSlot, Course, ClassRoutine, OnlineClass
+
+try:
+    from .db.seeder import seed_from_upload
+except ImportError:
+    from db.seeder import seed_from_upload
+
+# Create tables
+Base.metadata.create_all(bind=engine)
 
 def _resolve_source_file() -> Path | None:
     files = sorted(DATA_DIR.glob("*.xlsx"))
     if files:
         return files[0]
-    for path in DEFAULT_ROUTINE_PATHS:
-        if path and os.path.isfile(path):
-            return Path(path)
     return None
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Auto-load routine on startup. Priority: Supabase (Source of Truth) > local uploaded file > default test paths."""
-    loaded = False
-
     if supabase_client:
         try:
             files = supabase_client.storage.from_(SUPABASE_BUCKET).list()
@@ -81,39 +80,10 @@ async def lifespan(app: FastAPI):
                 dest_path = DATA_DIR / latest_filename
                 with open(dest_path, "wb") as f:
                     f.write(file_bytes)
-                logger.info(f"Force-synced latest routine '{latest_filename}' from Supabase bucket.")
+                logger.info(f"Synced latest routine file '{latest_filename}' for downloads.")
         except Exception as e:
-            logger.warning(f"Failed to force-sync from Supabase: {e}")
-
-    uploaded_files = sorted(DATA_DIR.glob("*.xlsx"))
-    if uploaded_files:
-        path = str(uploaded_files[0])
-        try:
-            data = await parse_excel(path)
-            await set_state(data, filename=uploaded_files[0].name)
-            logger.info(f"Auto-loaded uploaded routine: {uploaded_files[0].name} "
-                        f"({len(data['groups'])} groups, {data['total']} entries)")
-            loaded = True
-        except Exception as e:
-            logger.warning(f"Failed to auto-load uploaded routine {path}: {e}")
-
-    if not loaded:
-        for path in DEFAULT_ROUTINE_PATHS:
-            if path and os.path.isfile(path):
-                try:
-                    data = await parse_excel(path)
-                    await set_state(data, filename=Path(path).name)
-                    logger.info(f"Auto-loaded default routine: {Path(path).name} "
-                                f"({len(data['groups'])} groups, {data['total']} entries)")
-                    loaded = True
-                except Exception as e:
-                    logger.warning(f"Failed to auto-load routine from {path}: {e}")
-                break
-
-    if not loaded:
-        logger.info("No routine file found — upload required.")
+            logger.warning(f"Failed to sync from Supabase: {e}")
     yield
-
 
 app = FastAPI(title="ECSE Routine Generator", lifespan=lifespan)
 
@@ -126,43 +96,51 @@ app.add_middleware(
 
 app.include_router(exam_router)
 
-
 # ── Health ────────────────────────────────────────────────────────────────────
-
 @app.api_route("/api/v1/health", methods=["GET", "HEAD"])
-async def health():
-    return {"status": "ok", "loaded": is_loaded()}
-
+async def health(db: Session = Depends(get_db)):
+    dept = db.query(Department).first()
+    return {"status": "ok", "loaded": dept is not None}
 
 # ── Admin Status ──────────────────────────────────────────────────────────────
-
 @app.get("/api/v1/admin/status")
-async def admin_status():
-    meta = await get_routine_meta()
+async def admin_status(db: Session = Depends(get_db)):
+    semester = db.query(Semester).order_by(Semester.created_at.desc()).first()
+    if not semester:
+        return {
+            "loaded": False,
+            "filename": None,
+            "uploaded_at": None,
+            "groups_count": 0,
+            "total_entries": 0,
+        }
+    
+    groups_count = db.query(Group).filter(Group.department_id == semester.department_id).count()
+    cr_count = db.query(ClassRoutine).filter(ClassRoutine.semester_id == semester.id).count()
+    oc_count = db.query(OnlineClass).filter(OnlineClass.semester_id == semester.id).count()
+
+    source = _resolve_source_file()
+
     return {
-        "loaded": is_loaded(),
-        "filename": meta["filename"],
-        "uploaded_at": meta["uploaded_at"],
-        "groups_count": meta["groups_count"],
-        "total_entries": meta["total_entries"],
+        "loaded": True,
+        "filename": source.name if source else None,
+        "uploaded_at": semester.created_at.isoformat() if semester.created_at else None,
+        "groups_count": groups_count,
+        "total_entries": cr_count + oc_count,
     }
 
-
 # ── Upload ────────────────────────────────────────────────────────────────────
-
 @app.post("/api/v1/upload", response_model=UploadResponse)
-async def upload(file: UploadFile = File(...), password: str = Form(""), replace: bool = Form(False)):
+async def upload(file: UploadFile = File(...), password: str = Form(""), replace: bool = Form(False), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
         raise HTTPException(401, "Invalid admin password.")
 
     if not file.filename.endswith(".xlsx"):
         raise HTTPException(400, "Only .xlsx files are supported.")
 
-    if is_loaded() and not replace:
-        raise HTTPException(
-            409,
-            "A routine is already loaded. Use replace to overwrite it."
-        )
+    existing_cr = db.query(ClassRoutine).first()
+    if existing_cr and not replace:
+        raise HTTPException(409, "A routine is already loaded. Use replace to overwrite it.")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
         shutil.copyfileobj(file.file, tmp)
@@ -194,11 +172,14 @@ async def upload(file: UploadFile = File(...), password: str = Form(""), replace
                 file_bytes,
                 file_options={"content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
             )
-            logger.info(f"Uploaded '{file.filename}' to Supabase bucket '{SUPABASE_BUCKET}'")
         except Exception as e:
             logger.warning(f"Failed to sync with Supabase: {e}")
 
-    await set_state(data, filename=file.filename)
+    try:
+        seed_from_upload(data, db, replace)
+    except Exception as e:
+        logger.error(f"Seeding failed: {e}")
+        raise HTTPException(500, f"Failed to store in DB: {e}")
 
     action = "Replaced" if replace else "Uploaded"
     return UploadResponse(
@@ -211,68 +192,152 @@ async def upload(file: UploadFile = File(...), password: str = Form(""), replace
         message=f"{action} successfully. {data['total']} entries across {len(data['groups'])} groups."
     )
 
-
 # ── Groups ────────────────────────────────────────────────────────────────────
-
 @app.get("/api/v1/groups")
-async def list_groups():
-    state = await get_state()
-    meta = await get_routine_meta()
+async def list_groups(db: Session = Depends(get_db)):
+    semester = db.query(Semester).order_by(Semester.created_at.desc()).first()
+    if not semester:
+        return {
+            "groups": [],
+            "title": None,
+            "season": None,
+            "source_filename": None,
+            "source_available": False,
+        }
+    
+    groups = db.query(Group).filter(Group.department_id == semester.department_id).order_by(Group.group_code).all()
+    group_names = [g.group_code for g in groups]
     source_path = _resolve_source_file()
+    
     return {
-        "groups": state["groups"],
-        "title": state.get("title"),
-        "season": state.get("season"),
-        "source_filename": meta["filename"],
-        "source_available": source_path is not None and is_loaded(),
+        "groups": group_names,
+        "title": f"Routine for {semester.name}",
+        "season": semester.name,
+        "source_filename": source_path.name if source_path else None,
+        "source_available": source_path is not None,
     }
 
-
 @app.get("/api/v1/source-file")
-async def download_source_file():
-    if not is_loaded():
-        raise HTTPException(404, "No routine loaded.")
-
+async def download_source_file(db: Session = Depends(get_db)):
     source_path = _resolve_source_file()
     if source_path is None:
         raise HTTPException(404, "Source file not found on disk.")
 
-    meta = await get_routine_meta()
-    filename = meta["filename"] or source_path.name
-
     return FileResponse(
         path=str(source_path),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=filename,
+        filename=source_path.name,
     )
 
-
 # ── Routine by group ──────────────────────────────────────────────────────────
-
-
-
-
 @app.get("/api/v1/routine/{group_id}", response_model=GroupRoutineResponse)
-async def get_routine(group_id: str):
-    state = await get_state()
+async def get_routine(group_id: str, db: Session = Depends(get_db)):
     group_id = group_id.upper()
-
-    if not state["groups"]:
+    semester = db.query(Semester).order_by(Semester.created_at.desc()).first()
+    if not semester:
         raise HTTPException(404, "No routine loaded. Please upload a file first.")
 
-    entries = state["index"].get(group_id)
-    if entries is None:
+    group = db.query(Group).filter(
+        Group.department_id == semester.department_id, 
+        Group.group_code == group_id
+    ).first()
+    
+    if not group:
         raise HTTPException(404, f"Group '{group_id}' not found.")
 
-    seen, unique = set(), []
-    for e in entries:
-        teacher_name = e["teacher"]["name"] if isinstance(e.get("teacher"), dict) else e.get("teacher")
-        key = (e.get("day"), e["time_slot"], e["course_code"], e["section_type"], teacher_name)
-        if key not in seen:
-            seen.add(key)
-            unique.append(dict(e))
+    cr_entries = db.query(ClassRoutine).filter(
+        ClassRoutine.semester_id == semester.id,
+        ClassRoutine.group_id == group.id
+    ).all()
+    
+    oc_entries = db.query(OnlineClass).filter(
+        OnlineClass.semester_id == semester.id,
+        OnlineClass.group_id == group.id
+    ).all()
+    
+    formatted_entries = []
+    
+    # Process Regular & Lab Routines
+    for cr in cr_entries:
+        c = db.query(Course).get(cr.course_id)
+        t = db.query(Teacher).get(cr.teacher_id) if cr.teacher_id else None
+        r = db.query(Room).get(cr.room_id) if cr.room_id else None
+        ts = db.query(TimeSlot).get(cr.time_slot_id)
+        
+        t_dict = {
+            "name": t.name if t else "",
+            "designation": t.designation if t else "",
+            "department": "", # Home dept joined not required for output payload
+            "mobile": t.mobile_number if t else "",
+            "email": t.email if t else ""
+        }
+        
+        start_t = ts.start_time.strftime("%I:%M %p").lower() if ts else ""
+        end_t = ts.end_time.strftime("%I:%M %p").lower() if ts else ""
+        if start_t.startswith("0"): start_t = start_t[1:]
+        if end_t.startswith("0"): end_t = end_t[1:]
+        
+        slot_str = f"{start_t}-{end_t}"
 
-    merged = merge_consecutive_entries(unique)
+        sec_type = "lab" if (r and r.is_lab) else "theory"
+        if cr.week_parity:
+            sec_type = f"lab_{cr.week_parity}"
+            
+        formatted_entries.append({
+            "course_code": c.course_code if c else "",
+            "course": c.course_code if c else "",
+            "group": group.group_code,
+            "teacher_acro": t.acronym if t else "",
+            "teacher": t_dict,
+            "room": r.room_code if r else "",
+            "time_slot": slot_str,
+            "start_time": start_t,
+            "end_time": end_t,
+            "day": cr.day_of_week or "Sunday",
+            "type": sec_type.split('_')[0],
+            "odd_even": cr.week_parity,
+            "section_type": sec_type,
+            "week_note": ""
+        })
+        
+    # Process Online Classes
+    for oc in oc_entries:
+        c = db.query(Course).get(oc.course_id)
+        t = db.query(Teacher).get(oc.teacher_id) if oc.teacher_id else None
+        
+        t_dict = {
+            "name": t.name if t else "",
+            "designation": t.designation if t else "",
+            "department": "",
+            "mobile": t.mobile_number if t else "",
+            "email": t.email if t else ""
+        }
+        
+        start_t = oc.time_start.strftime("%I:%M %p").lower() if oc else ""
+        end_t = oc.time_end.strftime("%I:%M %p").lower() if oc else ""
+        if start_t.startswith("0"): start_t = start_t[1:]
+        if end_t.startswith("0"): end_t = end_t[1:]
+        
+        slot_str = f"{start_t}-{end_t}"
+            
+        formatted_entries.append({
+            "course_code": c.course_code if c else "",
+            "course": c.course_code if c else "",
+            "group": group.group_code,
+            "teacher_acro": t.acronym if t else "",
+            "teacher": t_dict,
+            "room": "Online",
+            "time_slot": slot_str,
+            "start_time": start_t,
+            "end_time": end_t,
+            "day": oc.day_of_week or "Sunday",
+            "type": "theory",
+            "odd_even": None,
+            "section_type": "online",
+            "week_note": ""
+        })
+
+    merged = merge_consecutive_entries(formatted_entries)
 
     day_order = {"Sunday": 0, "Monday": 1, "Tuesday": 2, "Wednesday": 3, "Thursday": 4, "Friday": 5, "Saturday": 6}
 
@@ -285,9 +350,9 @@ async def get_routine(group_id: str):
 
     return GroupRoutineResponse(
         group=group_id,
-        title=state.get("title"),
-        season=state.get("season"),
-        odd_week_dates=state.get("odd_week_dates", []),
-        even_week_dates=state.get("even_week_dates", []),
-        entries=[ScheduleEntry(**e) for e in merged]
+        title=f"Routine for {semester.name}",
+        season=semester.name,
+        odd_week_dates=[],
+        even_week_dates=[],
+        entries=[SchemaScheduleEntry(**e) for e in merged]
     )
