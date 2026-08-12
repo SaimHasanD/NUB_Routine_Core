@@ -35,9 +35,14 @@ except ImportError:
     from exam import router as exam_router
 
 try:
-    from .time_utils import normalize_to_24h, merge_consecutive_entries
+    from .parser.time_utils import normalize_to_24h, merge_consecutive_entries
 except ImportError:
-    from time_utils import normalize_to_24h, merge_consecutive_entries
+    from parser.time_utils import normalize_to_24h, merge_consecutive_entries
+
+try:
+    from .ingest import router as ingest_router
+except ImportError:
+    from ingest import router as ingest_router
 
 try:
     from .db.database import engine, get_db, Base
@@ -95,6 +100,7 @@ app.add_middleware(
 )
 
 app.include_router(exam_router)
+app.include_router(ingest_router)
 
 # ── Health ────────────────────────────────────────────────────────────────────
 @app.api_route("/api/v1/health", methods=["GET", "HEAD"])
@@ -104,9 +110,8 @@ async def health(db: Session = Depends(get_db)):
 
 # ── Admin Status ──────────────────────────────────────────────────────────────
 @app.get("/api/v1/admin/status")
-async def admin_status(db: Session = Depends(get_db)):
-    semester = db.query(Semester).order_by(Semester.created_at.desc()).first()
-    if not semester:
+async def admin_status():
+    if not supabase_client:
         return {
             "loaded": False,
             "filename": None,
@@ -115,18 +120,32 @@ async def admin_status(db: Session = Depends(get_db)):
             "total_entries": 0,
         }
     
-    groups_count = db.query(Group).filter(Group.department_id == semester.department_id).count()
-    cr_count = db.query(ClassRoutine).filter(ClassRoutine.semester_id == semester.id).count()
-    oc_count = db.query(OnlineClass).filter(OnlineClass.semester_id == semester.id).count()
+    sem_res = supabase_client.table("semesters").select("*").order("created_at", desc=True).limit(1).execute()
+    if not sem_res.data:
+        return {
+            "loaded": False,
+            "filename": None,
+            "uploaded_at": None,
+            "groups_count": 0,
+            "total_entries": 0,
+        }
+    
+    semester = sem_res.data[0]
+    
+    # We do a normal select since postgrest count is slightly complex with supabase-py
+    # and the dataset is extremely small (400 rows).
+    groups_res = supabase_client.table("groups").select("id").eq("department_id", semester["department_id"]).execute()
+    cr_res = supabase_client.table("class_routines").select("id").eq("semester_id", semester["id"]).execute()
+    oc_res = supabase_client.table("online_classes").select("id").eq("semester_id", semester["id"]).execute()
 
     source = _resolve_source_file()
 
     return {
         "loaded": True,
-        "filename": source.name if source else None,
-        "uploaded_at": semester.created_at.isoformat() if semester.created_at else None,
-        "groups_count": groups_count,
-        "total_entries": cr_count + oc_count,
+        "filename": source.name if source else "Routine Excel File",
+        "uploaded_at": semester["created_at"],
+        "groups_count": len(groups_res.data) if groups_res.data else 0,
+        "total_entries": (len(cr_res.data) if cr_res.data else 0) + (len(oc_res.data) if oc_res.data else 0),
     }
 
 # ── Upload ────────────────────────────────────────────────────────────────────
@@ -194,9 +213,18 @@ async def upload(file: UploadFile = File(...), password: str = Form(""), replace
 
 # ── Groups ────────────────────────────────────────────────────────────────────
 @app.get("/api/v1/groups")
-async def list_groups(db: Session = Depends(get_db)):
-    semester = db.query(Semester).order_by(Semester.created_at.desc()).first()
-    if not semester:
+async def list_groups():
+    if not supabase_client:
+        return {
+            "groups": [],
+            "title": None,
+            "season": None,
+            "source_filename": None,
+            "source_available": False,
+        }
+
+    sem_res = supabase_client.table("semesters").select("*").order("created_at", desc=True).limit(1).execute()
+    if not sem_res.data:
         return {
             "groups": [],
             "title": None,
@@ -205,14 +233,16 @@ async def list_groups(db: Session = Depends(get_db)):
             "source_available": False,
         }
     
-    groups = db.query(Group).filter(Group.department_id == semester.department_id).order_by(Group.group_code).all()
-    group_names = [g.group_code for g in groups]
+    semester = sem_res.data[0]
+    grp_res = supabase_client.table("groups").select("group_code").eq("department_id", semester["department_id"]).order("group_code").execute()
+    
+    group_names = [g["group_code"] for g in (grp_res.data or [])]
     source_path = _resolve_source_file()
     
     return {
         "groups": group_names,
-        "title": f"Routine for {semester.name}",
-        "season": semester.name,
+        "title": f"Routine for {semester['name']}",
+        "season": semester['name'],
         "source_filename": source_path.name if source_path else None,
         "source_available": source_path is not None,
     }
@@ -231,106 +261,115 @@ async def download_source_file(db: Session = Depends(get_db)):
 
 # ── Routine by group ──────────────────────────────────────────────────────────
 @app.get("/api/v1/routine/{group_id}", response_model=GroupRoutineResponse)
-async def get_routine(group_id: str, db: Session = Depends(get_db)):
+async def get_routine(group_id: str):
     group_id = group_id.upper()
-    semester = db.query(Semester).order_by(Semester.created_at.desc()).first()
-    if not semester:
+    if not supabase_client:
+        raise HTTPException(404, "No DB available.")
+
+    sem_res = supabase_client.table("semesters").select("*").order("created_at", desc=True).limit(1).execute()
+    if not sem_res.data:
         raise HTTPException(404, "No routine loaded. Please upload a file first.")
+    semester = sem_res.data[0]
 
-    group = db.query(Group).filter(
-        Group.department_id == semester.department_id, 
-        Group.group_code == group_id
-    ).first()
-    
-    if not group:
+    grp_res = supabase_client.table("groups").select("id, group_code").eq("department_id", semester["department_id"]).eq("group_code", group_id).execute()
+    if not grp_res.data:
         raise HTTPException(404, f"Group '{group_id}' not found.")
+    group = grp_res.data[0]
 
-    cr_entries = db.query(ClassRoutine).filter(
-        ClassRoutine.semester_id == semester.id,
-        ClassRoutine.group_id == group.id
-    ).all()
+    cr_res = supabase_client.table("class_routines").select(
+        "day_of_week, week_parity, "
+        "courses(course_code), "
+        "teachers(name, designation, mobile_number, email, acronym), "
+        "rooms(room_code, is_lab), "
+        "time_slots(start_time, end_time)"
+    ).eq("semester_id", semester["id"]).eq("group_id", group["id"]).execute()
     
-    oc_entries = db.query(OnlineClass).filter(
-        OnlineClass.semester_id == semester.id,
-        OnlineClass.group_id == group.id
-    ).all()
+    oc_res = supabase_client.table("online_classes").select(
+        "day_of_week, time_start, time_end, "
+        "courses(course_code), "
+        "teachers(name, designation, mobile_number, email, acronym)"
+    ).eq("semester_id", semester["id"]).eq("group_id", group["id"]).execute()
     
     formatted_entries = []
     
-    # Process Regular & Lab Routines
-    for cr in cr_entries:
-        c = db.query(Course).get(cr.course_id)
-        t = db.query(Teacher).get(cr.teacher_id) if cr.teacher_id else None
-        r = db.query(Room).get(cr.room_id) if cr.room_id else None
-        ts = db.query(TimeSlot).get(cr.time_slot_id)
+    def format_time(t_str):
+        if not t_str: return ""
+        try:
+            from datetime import datetime
+            t_obj = datetime.strptime(t_str, "%H:%M:%S")
+            res = t_obj.strftime("%I:%M %p").lower()
+            return res[1:] if res.startswith("0") else res
+        except:
+            return t_str
+
+    for cr in cr_res.data:
+        c = cr.get("courses") or {}
+        t = cr.get("teachers") or {}
+        r = cr.get("rooms") or {}
+        ts = cr.get("time_slots") or {}
         
         t_dict = {
-            "name": t.name if t else "",
-            "designation": t.designation if t else "",
-            "department": "", # Home dept joined not required for output payload
-            "mobile": t.mobile_number if t else "",
-            "email": t.email if t else ""
+            "name": t.get("name", ""),
+            "designation": t.get("designation", ""),
+            "department": "",
+            "mobile": t.get("mobile_number", ""),
+            "email": t.get("email", "")
         }
         
-        start_t = ts.start_time.strftime("%I:%M %p").lower() if ts else ""
-        end_t = ts.end_time.strftime("%I:%M %p").lower() if ts else ""
-        if start_t.startswith("0"): start_t = start_t[1:]
-        if end_t.startswith("0"): end_t = end_t[1:]
+        start_t = format_time(ts.get("start_time", ""))
+        end_t = format_time(ts.get("end_time", ""))
         
         slot_str = f"{start_t}-{end_t}"
-
-        sec_type = "lab" if (r and r.is_lab) else "theory"
-        if cr.week_parity:
-            sec_type = f"lab_{cr.week_parity}"
+        
+        sec_type = "lab" if r.get("is_lab") else "theory"
+        if cr.get("week_parity"):
+            sec_type = f"lab_{cr['week_parity']}"
             
         formatted_entries.append({
-            "course_code": c.course_code if c else "",
-            "course": c.course_code if c else "",
-            "group": group.group_code,
-            "teacher_acro": t.acronym if t else "",
+            "course_code": c.get("course_code", ""),
+            "course": c.get("course_code", ""),
+            "group": group["group_code"],
+            "teacher_acro": t.get("acronym", ""),
             "teacher": t_dict,
-            "room": r.room_code if r else "",
+            "room": r.get("room_code", ""),
             "time_slot": slot_str,
             "start_time": start_t,
             "end_time": end_t,
-            "day": cr.day_of_week or "Sunday",
+            "day": cr.get("day_of_week") or "Sunday",
             "type": sec_type.split('_')[0],
-            "odd_even": cr.week_parity,
+            "odd_even": cr.get("week_parity"),
             "section_type": sec_type,
             "week_note": ""
         })
         
-    # Process Online Classes
-    for oc in oc_entries:
-        c = db.query(Course).get(oc.course_id)
-        t = db.query(Teacher).get(oc.teacher_id) if oc.teacher_id else None
+    for oc in oc_res.data:
+        c = oc.get("courses") or {}
+        t = oc.get("teachers") or {}
         
         t_dict = {
-            "name": t.name if t else "",
-            "designation": t.designation if t else "",
+            "name": t.get("name", ""),
+            "designation": t.get("designation", ""),
             "department": "",
-            "mobile": t.mobile_number if t else "",
-            "email": t.email if t else ""
+            "mobile": t.get("mobile_number", ""),
+            "email": t.get("email", "")
         }
         
-        start_t = oc.time_start.strftime("%I:%M %p").lower() if oc else ""
-        end_t = oc.time_end.strftime("%I:%M %p").lower() if oc else ""
-        if start_t.startswith("0"): start_t = start_t[1:]
-        if end_t.startswith("0"): end_t = end_t[1:]
+        start_t = format_time(oc.get("time_start", ""))
+        end_t = format_time(oc.get("time_end", ""))
         
         slot_str = f"{start_t}-{end_t}"
             
         formatted_entries.append({
-            "course_code": c.course_code if c else "",
-            "course": c.course_code if c else "",
-            "group": group.group_code,
-            "teacher_acro": t.acronym if t else "",
+            "course_code": c.get("course_code", ""),
+            "course": c.get("course_code", ""),
+            "group": group["group_code"],
+            "teacher_acro": t.get("acronym", ""),
             "teacher": t_dict,
             "room": "Online",
             "time_slot": slot_str,
             "start_time": start_t,
             "end_time": end_t,
-            "day": oc.day_of_week or "Sunday",
+            "day": oc.get("day_of_week") or "Sunday",
             "type": "theory",
             "odd_even": None,
             "section_type": "online",
@@ -350,8 +389,8 @@ async def get_routine(group_id: str, db: Session = Depends(get_db)):
 
     return GroupRoutineResponse(
         group=group_id,
-        title=f"Routine for {semester.name}",
-        season=semester.name,
+        title=f"Routine for {semester['name']}",
+        season=semester['name'],
         odd_week_dates=[],
         even_week_dates=[],
         entries=[SchemaScheduleEntry(**e) for e in merged]
