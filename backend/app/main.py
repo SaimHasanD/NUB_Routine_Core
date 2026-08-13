@@ -328,9 +328,78 @@ async def get_routine(group_id: str):
             "section_type": section_type
         })
         
+    def get_group_key(r):
+        t_acro = r["teacher"]["acronym"] if r["teacher"] else ""
+        return (r["day"], r["course"], t_acro, r["room"], r["odd_even"], r["section_type"])
+
+    result.sort(key=lambda x: (get_group_key(x), x["start_time"]))
+
+    merged_result = []
+    for r in result:
+        if not merged_result:
+            merged_result.append(r)
+            continue
+            
+        last = merged_result[-1]
+        if get_group_key(last) == get_group_key(r) and last["end_time"] == r["start_time"]:
+            last["end_time"] = r["end_time"]
+        else:
+            merged_result.append(r)
+            
+    # Optional: re-sort by day (using some standard order) and start_time, or just leave it.
+    # The frontend already groups by day. 
+    # But to keep output clean, let's sort by day of week then start_time.
+    days_order = {"Sunday": 1, "Monday": 2, "Tuesday": 3, "Wednesday": 4, "Thursday": 5, "Friday": 6, "Saturday": 7}
+    merged_result.sort(key=lambda x: (days_order.get(x["day"], 99), x["start_time"]))
+        
     return {
         "semester": semester_obj,
         "odd_week_dates": odd_dates,
         "even_week_dates": even_dates,
-        "routine": result
+        "routine": merged_result
     }
+
+# ── Teachers API ──────────────────────────────────────────────────────────────
+@app.get("/api/v1/teachers")
+async def get_teachers():
+    teachers = supabase_client.table("teachers").select("id, acronym, name, designation, department, mobile_number, email").execute().data
+    return teachers
+
+@app.get("/api/v1/teachers/schedule")
+async def get_teachers_schedule():
+    routines = supabase_client.table("class_routines").select("*").execute().data
+    if not routines:
+        return []
+        
+    course_ids = list({r["course_id"] for r in routines if r.get("course_id")})
+    teacher_ids = list({r["teacher_id"] for r in routines if r.get("teacher_id")})
+    room_ids = list({r["room_id"] for r in routines if r.get("room_id")})
+    time_slot_ids = list({r["time_slot_id"] for r in routines if r.get("time_slot_id")})
+    group_ids = list({r["group_id"] for r in routines if r.get("group_id")})
+    
+    courses_dict = {c["id"]: c for c in supabase_client.table("courses").select("id, course_code, course_name").in_("id", course_ids).execute().data} if course_ids else {}
+    teachers_dict = {t["id"]: t for t in supabase_client.table("teachers").select("id, acronym").in_("id", teacher_ids).execute().data} if teacher_ids else {}
+    rooms_dict = {r["id"]: r for r in supabase_client.table("rooms").select("id, room_code").in_("id", room_ids).execute().data} if room_ids else {}
+    time_slots_dict = {ts["id"]: ts for ts in supabase_client.table("time_slots").select("id, start_time, end_time").in_("id", time_slot_ids).execute().data} if time_slot_ids else {}
+    groups_dict = {g["id"]: g for g in supabase_client.table("groups").select("id, group_code").in_("id", group_ids).execute().data} if group_ids else {}
+
+    result = []
+    for r in routines:
+        course = courses_dict.get(r.get("course_id"))
+        teacher = teachers_dict.get(r.get("teacher_id"))
+        room = rooms_dict.get(r.get("room_id"))
+        time_slot = time_slots_dict.get(r.get("time_slot_id"))
+        group = groups_dict.get(r.get("group_id"))
+        
+        result.append({
+            "course_code": course["course_code"] if course else None,
+            "course": course["course_name"] if course and "course_name" in course else None,
+            "group": group["group_code"] if group else None,
+            "teacher_acro": teacher["acronym"] if teacher else None,
+            "room": room["room_code"] if room else None,
+            "start_time": time_slot["start_time"] if time_slot else None,
+            "end_time": time_slot["end_time"] if time_slot else None,
+            "day": r.get("day_of_week").capitalize() if r.get("day_of_week") else None,
+            "type": "Theory" if r.get("week_parity") is None else "Lab"
+        })
+    return result
