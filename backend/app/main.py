@@ -402,4 +402,30 @@ async def get_teachers_schedule():
             "day": r.get("day_of_week").capitalize() if r.get("day_of_week") else None,
             "type": "Theory" if r.get("week_parity") is None else "Lab"
         })
-    return result
+
+    def get_teacher_group_key(r):
+        return (r["day"], r["course_code"], r["group"], r["teacher_acro"], r["room"], r["type"])
+
+    result.sort(key=lambda x: (get_teacher_group_key(x), x["start_time"]))
+
+    merged_result = []
+    for r in result:
+        if not merged_result:
+            merged_result.append(r)
+            continue
+            
+        last = merged_result[-1]
+        
+        # Skip exact duplicates
+        if get_teacher_group_key(last) == get_teacher_group_key(r) and last["start_time"] == r["start_time"] and last["end_time"] == r["end_time"]:
+            continue
+            
+        if get_teacher_group_key(last) == get_teacher_group_key(r) and last["end_time"] == r["start_time"]:
+            last["end_time"] = r["end_time"]
+        else:
+            merged_result.append(r)
+            
+    days_order = {"Sunday": 1, "Monday": 2, "Tuesday": 3, "Wednesday": 4, "Thursday": 5, "Friday": 6, "Saturday": 7}
+    merged_result.sort(key=lambda x: (days_order.get(x["day"], 99), x["start_time"]))
+
+    return merged_result
