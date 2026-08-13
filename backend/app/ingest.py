@@ -4,7 +4,7 @@ import tempfile
 import traceback
 from typing import Dict, Any
 
-from fastapi import APIRouter, File, UploadFile, HTTPException, Header, Depends
+from fastapi import APIRouter, File, UploadFile, HTTPException, Form
 from pydantic import BaseModel
 
 from .shared import supabase_client, logger
@@ -16,24 +16,31 @@ router = APIRouter(prefix="/api/v1/ingest", tags=["ingest"])
 
 class IngestResponse(BaseModel):
     status: str
-    semester: str
     inserted: Dict[str, int]
     warnings: list[str]
 
 @router.post("/excel", response_model=IngestResponse)
 async def ingest_excel(
-    file: UploadFile = File(...),
-    x_upload_password: str = Header(None, alias="X-Upload-Password")
+    department_code: str = Form(...),
+    semester_id: str = Form(...),
+    file: UploadFile = File(...)
 ):
-    upload_pwd = os.environ.get("UPLOAD_PASSWORD", "admin123_nu")
-    if not x_upload_password or x_upload_password != upload_pwd:
-        raise HTTPException(status_code=401, detail="Missing or invalid upload password")
-
     if not file.filename.endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="Only .xlsx files are supported")
 
     if not supabase_client:
         raise HTTPException(status_code=500, detail="Supabase client not initialized")
+
+    # Check department
+    dept_resp = supabase_client.table("departments").select("id, code").eq("code", department_code).execute()
+    if not dept_resp.data:
+        raise HTTPException(status_code=400, detail=f"Department code '{department_code}' not found in DB")
+    department_id = dept_resp.data[0]["id"]
+
+    # Check semester
+    sem_resp = supabase_client.table("semesters").select("id").eq("id", semester_id).execute()
+    if not sem_resp.data:
+        raise HTTPException(status_code=400, detail=f"Semester ID '{semester_id}' not found in DB")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
         shutil.copyfileobj(file.file, tmp)
@@ -53,184 +60,176 @@ async def ingest_excel(
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
+    # 0. Validate sheet 1
+    valid_entries = sum(len(entries) for entries in parsed_data["index"].values())
+    if valid_entries == 0:
+        raise HTTPException(status_code=500, detail="Entire Sheet 1 parse produces zero valid entries")
+
     warnings = []
-
-    # 1. Fetch departments
-    dept_resp = supabase_client.table("departments").select("id, code").execute()
-    dept_map = {d["code"]: d["id"] for d in dept_resp.data}
-    ecse_dept_id = dept_map.get("ECSE")
-    if not ecse_dept_id:
-        raise HTTPException(status_code=500, detail="ECSE department not found in DB")
-
-    # Fetch active semester for ECSE
-    semesters_resp = supabase_client.table("semesters").select("id, name").eq("department_id", ecse_dept_id).eq("is_active", True).execute()
-    if not semesters_resp.data:
-        raise HTTPException(status_code=409, detail="No active semester found for ECSE — upload aborted")
     
-    active_semester = semesters_resp.data[0]
-    semester_id = active_semester["id"]
-    semester_name = active_semester["name"]
-
-    # --- DB Writes ---
-
     # 1. Teachers
     teachers_data = []
     for acro, info in faculty_map.items():
         if not acro:
             continue
-        dept_id = dept_map.get(info.get("department"))
         teachers_data.append({
-            "acronym": acro,
             "name": info.get("name"),
+            "acronym": acro,
             "designation": info.get("designation"),
-            "home_department_id": dept_id,
-            "mobile_number": info.get("mobile"),
-            "email": info.get("email"),
-            "is_adjunct": False
+            "department_name": info.get("department"),
+            "mobile": info.get("mobile"),
+            "email": info.get("email")
         })
     if teachers_data:
         supabase_client.table("teachers").upsert(teachers_data, on_conflict="acronym").execute()
 
-    # Re-fetch teachers for mapping
+    # Re-fetch for FKs
     teachers_resp = supabase_client.table("teachers").select("id, acronym").execute()
-    teacher_id_map = {t["acronym"]: t["id"] for t in teachers_resp.data}
+    teacher_map = {t["acronym"]: t["id"] for t in teachers_resp.data}
 
     # 2. Rooms
     rooms_data = []
     seen_rooms = set()
     for entries in parsed_data["index"].values():
         for e in entries:
-            room_code = e.get("room")
-            if not room_code or room_code.lower() == "online":
+            room_name = e.get("room")
+            if not room_name or room_name.lower() == "online":
                 continue
-            if room_code in seen_rooms:
+            if room_name in seen_rooms:
                 continue
-            seen_rooms.add(room_code)
-            
-            building = None
-            if "(" in room_code and ")" in room_code:
-                building = room_code.split("(")[1].split(")")[0]
-                
-            is_lab = e.get("section_type", "").startswith("lab")
-            
+            seen_rooms.add(room_name)
             rooms_data.append({
-                "room_code": room_code,
-                "building": building,
-                "is_lab": is_lab
+                "room_name": room_name
             })
     if rooms_data:
-        supabase_client.table("rooms").upsert(rooms_data, on_conflict="room_code").execute()
+        supabase_client.table("rooms").upsert(rooms_data, on_conflict="room_name").execute()
 
-    # Re-fetch rooms for mapping
-    rooms_resp = supabase_client.table("rooms").select("id, room_code").execute()
-    room_id_map = {r["room_code"]: r["id"] for r in rooms_resp.data}
+    rooms_resp = supabase_client.table("rooms").select("id, room_name").execute()
+    room_map = {r["room_name"]: r["id"] for r in rooms_resp.data}
 
     # 3. Courses
     courses_data = []
     seen_courses = set()
     for entries in parsed_data["index"].values():
         for e in entries:
-            course_code = e.get("course")
-            if not course_code:
+            course = e.get("course")
+            if not course:
                 continue
-            course_code = course_code.upper().strip()
+            course_code = course.upper().strip()
             if course_code in seen_courses:
                 continue
             seen_courses.add(course_code)
             courses_data.append({
-                "course_code": course_code
+                "course_code": course_code,
+                "department_id": department_id
+            })
+    for g_courses in parsed_data["online_classes"].values():
+        for e in g_courses:
+            course = e.get("course")
+            if not course:
+                continue
+            course_code = course.upper().strip()
+            if course_code in seen_courses:
+                continue
+            seen_courses.add(course_code)
+            courses_data.append({
+                "course_code": course_code,
+                "department_id": department_id
             })
     if courses_data:
         supabase_client.table("courses").upsert(courses_data, on_conflict="course_code").execute()
 
-    # Re-fetch courses for mapping
     courses_resp = supabase_client.table("courses").select("id, course_code").execute()
-    course_id_map = {c["course_code"]: c["id"] for c in courses_resp.data}
+    course_map = {c["course_code"]: c["id"] for c in courses_resp.data}
 
     # 4. Groups
     groups_data = []
     seen_groups = set()
-    for g in parsed_data["groups"]:
-        if g in seen_groups: continue
-        seen_groups.add(g)
-        
-        academic_semester = int(g[0]) if g and g[0].isdigit() else None
+    for entries in parsed_data["index"].values():
+        for e in entries:
+            group_code = e.get("group")
+            if not group_code or group_code in seen_groups:
+                continue
+            seen_groups.add(group_code)
+            try:
+                academic_semester = int(group_code[0])
+            except (ValueError, IndexError):
+                academic_semester = 1 # fallback
+            groups_data.append({
+                "department_id": department_id,
+                "group_code": group_code,
+                "academic_semester": academic_semester
+            })
+    for g_code in parsed_data["online_classes"].keys():
+        if not g_code or g_code in seen_groups:
+            continue
+        seen_groups.add(g_code)
+        try:
+            academic_semester = int(g_code[0])
+        except (ValueError, IndexError):
+            academic_semester = 1 # fallback
         groups_data.append({
-            "department_id": ecse_dept_id,
-            "group_code": g,
+            "department_id": department_id,
+            "group_code": g_code,
             "academic_semester": academic_semester
         })
     if groups_data:
         supabase_client.table("groups").upsert(groups_data, on_conflict="department_id,group_code").execute()
 
-    # Re-fetch groups for mapping
-    groups_resp = supabase_client.table("groups").select("id, department_id, group_code").eq("department_id", ecse_dept_id).execute()
-    group_id_map = {g["group_code"]: g["id"] for g in groups_resp.data}
+    groups_resp = supabase_client.table("groups").select("id, group_code").eq("department_id", department_id).execute()
+    group_map = {g["group_code"]: g["id"] for g in groups_resp.data}
 
-    # Fetch time_slots
+    # 5. Class Routines
     ts_resp = supabase_client.table("time_slots").select("id, start_time").eq("semester_id", semester_id).execute()
     ts_map = {}
     for ts in ts_resp.data:
-        # start_time is likely "08:00:00" in db
         st_db = ts["start_time"]
         if st_db.count(":") == 2:
-            # Drop seconds
             st_db = ":".join(st_db.split(":")[:2])
         ts_map[st_db] = ts["id"]
 
-    # 5. Class Routines
-    # Delete existing
-    supabase_client.table("class_routines").delete().eq("semester_id", semester_id).eq("department_id", ecse_dept_id).execute()
-
     cr_data = []
-    skipped_ts_count = 0
-    missing_acro_count = 0
-    missing_room_count = 0
-
-    for entries in parsed_data["index"].values():
-        for e in entries:
-            g_code = e.get("group")
-            group_id = group_id_map.get(g_code)
-            if not group_id:
-                continue
-                
-            c_code = e.get("course")
-            if c_code: c_code = c_code.upper().strip()
-            course_id = course_id_map.get(c_code)
-            if not course_id:
-                continue
-
-            # Teacher
-            acro = e.get("teacher_acro")
-            teacher_id = None
-            if acro:
-                teacher_id = teacher_id_map.get(acro)
-                if not teacher_id:
-                    missing_acro_count += 1
+    for row_idx, (room_str, entries) in enumerate(parsed_data["index"].items()):
+        for col_idx, e in enumerate(entries):
+            course_code = e.get("course")
+            if course_code: course_code = course_code.upper().strip()
+            course_id = course_map.get(course_code)
             
-            # Room
-            r_code = e.get("room")
-            room_id = None
-            if r_code and r_code.lower() != "online":
-                room_id = room_id_map.get(r_code)
-                if not room_id:
-                    missing_room_count += 1
-
-            # Time slot
+            group_code = e.get("group")
+            group_id = group_map.get(group_code)
+            
+            teacher_acro = e.get("teacher_acro")
+            teacher_id = teacher_map.get(teacher_acro)
+            
+            room_name = e.get("room")
+            room_id = room_map.get(room_name)
+            
+            day = e.get("day", "").lower()
+            
             st_str = e.get("start_time")
             st_24h = normalize_to_24h(st_str)
             time_slot_id = ts_map.get(st_24h)
             
-            if not time_slot_id:
-                skipped_ts_count += 1
+            failed = []
+            if not course_id: failed.append(f"course '{course_code}'")
+            if not group_id: failed.append(f"group '{group_code}'")
+            if not teacher_id and teacher_acro: failed.append(f"teacher acronym '{teacher_acro}'")
+            if not room_id and room_name and room_name.lower() != "online": failed.append(f"room '{room_name}'")
+            if not time_slot_id: failed.append(f"time slot '{st_str}'")
+
+            if failed:
+                warnings.append(f"Could not resolve {', '.join(failed)} for entry '{course_code}-{group_code}' at room '{room_name}', slot '{st_str}'")
                 continue
 
-            day = e.get("day", "").lower()
-            week_parity = e.get("odd_even")  # "odd" | "even" | None
+            week_parity = e.get("odd_even")
+            if week_parity:
+                week_parity = week_parity.lower()
+                if week_parity not in ["odd", "even"]:
+                    week_parity = None
             
             cr_data.append({
                 "semester_id": semester_id,
-                "department_id": ecse_dept_id,
+                "department_id": department_id,
                 "group_id": group_id,
                 "course_id": course_id,
                 "teacher_id": teacher_id,
@@ -240,33 +239,83 @@ async def ingest_excel(
                 "week_parity": week_parity
             })
 
-    # Insert routines in chunks of 500 to avoid too large payload
-    inserted_routines = 0
-    chunk_size = 500
-    for i in range(0, len(cr_data), chunk_size):
-        chunk = cr_data[i:i+chunk_size]
-        res = supabase_client.table("class_routines").insert(chunk).execute()
-        inserted_routines += len(chunk)
+    cr_inserted = 0
+    if cr_data:
+        chunk_size = 500
+        for i in range(0, len(cr_data), chunk_size):
+            chunk = cr_data[i:i+chunk_size]
+            res = supabase_client.table("class_routines").insert(chunk).execute()
+            if hasattr(res, 'data') and res.data:
+                cr_inserted += len(res.data)
+            else:
+                cr_inserted += len(chunk)
 
-    if missing_acro_count > 0:
-        warnings.append(f"Teacher acronyms not found in faculty sheet — teacher_id set to null for {missing_acro_count} entries")
-    if missing_room_count > 0:
-        warnings.append(f"Room empty or not found — room_id set to null for {missing_room_count} entries")
-    if skipped_ts_count > 0:
-        warnings.append(f"Time slots not matched in DB — {skipped_ts_count} entries skipped")
+    # 6. Online Classes
+    oc_data = []
+    for g_code, entries in parsed_data["online_classes"].items():
+        group_id = group_map.get(g_code)
+        if not group_id:
+            warnings.append(f"Could not resolve group '{g_code}' for online classes")
+            continue
+            
+        for e in entries:
+            course_code = e.get("course")
+            if course_code: course_code = course_code.upper().strip()
+            course_id = course_map.get(course_code)
+            
+            teacher_acro = e.get("teacher_acro")
+            teacher_id = teacher_map.get(teacher_acro)
+            
+            if not course_id:
+                warnings.append(f"Could not resolve course '{course_code}' for online class in group '{g_code}'")
+                continue
+            if not teacher_id and teacher_acro:
+                warnings.append(f"Could not resolve teacher acronym '{teacher_acro}' for online class in group '{g_code}'")
+                
+            day = e.get("day", "").lower()
+            st_str = e.get("start_time")
+            end_str = e.get("end_time")
+            
+            st_24h = normalize_to_24h(st_str)
+            end_24h = normalize_to_24h(end_str)
+            
+            if st_24h.count(":") == 1: st_24h += ":00"
+            if end_24h.count(":") == 1: end_24h += ":00"
+            
+            oc_data.append({
+                "semester_id": semester_id,
+                "department_id": department_id,
+                "group_id": group_id,
+                "course_id": course_id,
+                "teacher_id": teacher_id,
+                "day_of_week": day,
+                "time_start": st_24h,
+                "time_end": end_24h
+            })
+    
+    oc_inserted = 0
+    if oc_data:
+        chunk_size = 500
+        for i in range(0, len(oc_data), chunk_size):
+            chunk = oc_data[i:i+chunk_size]
+            res = supabase_client.table("online_classes").insert(chunk).execute()
+            if hasattr(res, 'data') and res.data:
+                oc_inserted += len(res.data)
+            else:
+                oc_inserted += len(chunk)
 
     for w in warnings:
         logger.warning(w)
 
     return IngestResponse(
-        status="success",
-        semester=semester_name,
+        status="ok",
         inserted={
             "teachers": len(teachers_data),
             "rooms": len(rooms_data),
             "courses": len(courses_data),
             "groups": len(groups_data),
-            "class_routines": inserted_routines
+            "class_routines": cr_inserted,
+            "online_classes": oc_inserted
         },
         warnings=warnings
     )
