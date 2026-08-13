@@ -167,9 +167,12 @@ export default function DashboardScreen() {
     setLoading(true);
     setHasSearched(true);
     try {
-      const data = await fetchRoutine(targetGroup.id);
-      setRoutine(data || []);
-      // If we don't have odd/even dates from routine anymore, we just rely on admin status
+      const { routine, odd_week_dates, even_week_dates, semester } = await fetchRoutine(targetGroup.id);
+      setRoutine(routine || []);
+      if (odd_week_dates) setOddDates(odd_week_dates);
+      if (even_week_dates) setEvenDates(even_week_dates);
+      if (semester && semester.name) setSeason(semester.name);
+      if (semester && semester.name) setTitle(semester.name); // Using semester name for display
     } catch (err) {
       console.error("Fetch routine error", err);
       setRoutine([]);

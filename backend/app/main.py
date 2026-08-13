@@ -208,8 +208,43 @@ async def download_source_file():
 async def get_routine(group_id: str):
     routines = supabase_client.table("class_routines").select("*").eq("group_id", group_id).execute().data
     
+    group_res = supabase_client.table("groups").select("department_id").eq("id", group_id).execute()
+    if not group_res.data:
+        raise HTTPException(404, "Group not found")
+    department_id = group_res.data[0]["department_id"]
+    
+    semester_res = supabase_client.table("semesters").select("id, name, start_date").eq("department_id", department_id).eq("is_active", True).execute()
+    if not semester_res.data:
+        semester_obj = {"name": "Unknown", "start_date": None}
+        odd_dates, even_dates = [], []
+    else:
+        sem_data = semester_res.data[0]
+        semester_obj = {"name": sem_data["name"], "start_date": sem_data["start_date"]}
+        
+        weeks = supabase_client.table("semester_weeks").select("week_number, week_start_date, parity").eq("semester_id", sem_data["id"]).order("week_number").execute().data
+        odd_dates = []
+        even_dates = []
+        if weeks:
+            for w in weeks:
+                sd = w.get("week_start_date")
+                formatted = sd
+                if sd and "-" in sd:
+                    parts = sd.split("-")
+                    if len(parts) >= 3:
+                        formatted = f"{parts[2][:2]}.{parts[1]}.{parts[0]}"
+                
+                if w.get("parity") == "odd":
+                    odd_dates.append(formatted)
+                elif w.get("parity") == "even":
+                    even_dates.append(formatted)
+
     if not routines:
-        return []
+        return {
+            "semester": semester_obj,
+            "odd_week_dates": odd_dates,
+            "even_week_dates": even_dates,
+            "routine": []
+        }
 
     course_ids = list({r["course_id"] for r in routines if r.get("course_id")})
     teacher_ids = list({r["teacher_id"] for r in routines if r.get("teacher_id")})
@@ -223,8 +258,16 @@ async def get_routine(group_id: str):
         
     teachers_dict = {}
     if teacher_ids:
-        teachers = supabase_client.table("teachers").select("id, name").in_("id", teacher_ids).execute().data
-        teachers_dict = {t["id"]: t for t in teachers}
+        teachers = supabase_client.table("teachers").select("id, acronym, name, designation, mobile_number, email, is_adjunct").in_("id", teacher_ids).execute().data
+        for t in teachers:
+            teachers_dict[t["id"]] = {
+                "acronym": t.get("acronym"),
+                "name": t.get("name"),
+                "designation": t.get("designation"),
+                "mobile": t.get("mobile_number"),
+                "email": t.get("email"),
+                "is_adjunct": t.get("is_adjunct")
+            }
         
     rooms_dict = {}
     if room_ids:
@@ -235,24 +278,56 @@ async def get_routine(group_id: str):
     if time_slot_ids:
         time_slots = supabase_client.table("time_slots").select("id, start_time, end_time").in_("id", time_slot_ids).execute().data
         time_slots_dict = {ts["id"]: ts for ts in time_slots}
+
+    theory_rows = []
+    lab_entries = {}
+    
+    for r in routines:
+        if r.get("week_parity") is None:
+            theory_rows.append(r)
+        else:
+            key = (r.get("day_of_week"), r.get("course_id"), r.get("teacher_id"), r.get("room_id"), r.get("time_slot_id"))
+            if key not in lab_entries:
+                lab_entries[key] = {"row": r, "parities": set()}
+            lab_entries[key]["parities"].add(r.get("week_parity"))
+
+    final_rows = []
+    final_rows.extend(theory_rows)
+    for key, data in lab_entries.items():
+        row = data["row"].copy()
+        parities = data["parities"]
+        if "odd" in parities and "even" in parities:
+            row["week_parity"] = "both"
+        elif "odd" in parities:
+            row["week_parity"] = "odd"
+        elif "even" in parities:
+            row["week_parity"] = "even"
+        final_rows.append(row)
         
     result = []
-    for r in routines:
+    for r in final_rows:
         course = courses_dict.get(r.get("course_id"))
         teacher = teachers_dict.get(r.get("teacher_id"))
         room = rooms_dict.get(r.get("room_id"))
         time_slot = time_slots_dict.get(r.get("time_slot_id"))
         
+        section_type = "Theory" if r.get("week_parity") is None else "Lab"
+        
         result.append({
             "id": r["id"],
             "day": r["day_of_week"].capitalize() if r.get("day_of_week") else None,
             "course": course["course_code"] if course else None,
-            "teacher": teacher["name"] if teacher else None,
+            "teacher": teacher if teacher else None,
             "room": room["room_code"] if room else None,
             "start_time": time_slot["start_time"] if time_slot else None,
             "end_time": time_slot["end_time"] if time_slot else None,
             "odd_even": r.get("week_parity"),
-            "section_type": "Lab" if r.get("week_parity") is not None else "Theory"
+            "section_type": section_type
         })
         
-    return result
+    return {
+        "semester": semester_obj,
+        "odd_week_dates": odd_dates,
+        "even_week_dates": even_dates,
+        "routine": result
+    }

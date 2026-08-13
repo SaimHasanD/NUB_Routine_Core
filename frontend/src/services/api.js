@@ -28,7 +28,13 @@ export function getSourceFileUrl() {
 export async function fetchRoutine(groupId) {
   const res = await fetch(`${BASE_URL}/routine/${groupId}`);
   if (!res.ok) throw new Error(`Failed to fetch routine for ${groupId}`);
-  return res.json();
+  const response = await res.json();
+  return {
+    routine: response.routine || [],
+    odd_week_dates: response.odd_week_dates || [],
+    even_week_dates: response.even_week_dates || [],
+    semester: response.semester || {}
+  };
 }
 
 export async function uploadExcel(file, password, replace = false) {
