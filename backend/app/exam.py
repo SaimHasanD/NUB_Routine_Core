@@ -9,15 +9,11 @@ try:
         ADMIN_PASSWORD, GEMINI_API_KEY, SUPABASE_BUCKET,
         EXAM_SCHEDULE_FILENAME, supabase_client, logger,
     )
-    from .db.database import get_db
-    from .db.models import Semester, Group, ClassRoutine, Course
 except ImportError:
     from shared import (
         ADMIN_PASSWORD, GEMINI_API_KEY, SUPABASE_BUCKET,
         EXAM_SCHEDULE_FILENAME, supabase_client, logger,
     )
-    from db.database import get_db
-    from db.models import Semester, Group, ClassRoutine, Course
 
 router = APIRouter()
 
@@ -185,8 +181,7 @@ def _dedupe_and_validate(exam_entries: list[dict]) -> tuple[list[dict], list[str
 @router.post("/api/v1/exam/upload")
 async def upload_exam_schedule(
     file: UploadFile = File(...),
-    password: str = Form(""),
-    db = Depends(get_db)
+    password: str = Form("")
 ):
     """Admin-only. Accept a JPG/PNG exam schedule image, extract structured JSON
     via Gemini Vision, validate/dedupe in code, enrich with semester numbers,
