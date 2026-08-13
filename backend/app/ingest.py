@@ -98,13 +98,14 @@ async def ingest_excel(
                 continue
             seen_rooms.add(room_name)
             rooms_data.append({
-                "room_name": room_name
+                "room_code": room_name,
+                "is_lab": "lab" in room_name.lower()
             })
     if rooms_data:
-        supabase_client.table("rooms").upsert(rooms_data, on_conflict="room_name").execute()
+        supabase_client.table("rooms").upsert(rooms_data, on_conflict="room_code").execute()
 
-    rooms_resp = supabase_client.table("rooms").select("id, room_name").execute()
-    room_map = {r["room_name"]: r["id"] for r in rooms_resp.data}
+    rooms_resp = supabase_client.table("rooms").select("id, room_code").execute()
+    room_map = {r["room_code"]: r["id"] for r in rooms_resp.data}
 
     # 3. Courses
     courses_data = []
