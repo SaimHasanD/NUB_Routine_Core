@@ -1,12 +1,10 @@
 import requests
 
-url = "http://127.0.0.1:8000/api/v1/ingest/excel"
+url = "https://nub-routine-core.onrender.com/api/v1/ingest/excel"
 
-# We don't have a valid semester_id, so we'll just make one up or use a UUID.
-# If the DB can't be reached, it'll fail anyway.
 data = {
     "department_code": "ECSE",
-    "semester_id": "00000000-0000-0000-0000-000000000000"
+    "semester_id": "763e59f8-ad6b-436b-a409-1ab76e23b5a2"
 }
 
 files = {

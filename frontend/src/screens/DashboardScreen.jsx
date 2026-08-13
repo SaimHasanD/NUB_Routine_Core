@@ -3,7 +3,7 @@ import { Search, ChevronDown, Calendar, BookOpen, FileText, Download, Image as I
 import RoutineTable from '../components/RoutineTable.jsx';
 import RoutinePreviewModal from '../components/RoutinePreviewModal.jsx';
 import RoutineDownloadLayout from '../components/RoutineDownloadLayout.jsx';
-import { healthCheck, fetchGroups, fetchRoutine, getSourceFileUrl } from '../services/api.js';
+import { healthCheck, fetchGroups, fetchRoutine, getSourceFileUrl, fetchAdminStatus } from '../services/api.js';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 import { getCaptureScale, getPdfImageDimensions, waitForExportReady, downloadCanvasAsImage } from '../utils/exportSheet.js';
@@ -123,11 +123,18 @@ export default function DashboardScreen() {
       try {
         await healthCheck();
         const data = await fetchGroups();
-        setGroups(data.groups || []);
-        if (data.title) setTitle(data.title);
-        if (data.season) setSeason(data.season);
-        setSourceFilename(data.source_filename || null);
-        setSourceAvailable(Boolean(data.source_available));
+        setGroups(data || []);
+        
+        // Try to fetch admin status for metadata (title, season, etc.)
+        try {
+          const status = await fetchAdminStatus();
+          if (status.title) setTitle(status.title);
+          if (status.season) setSeason(status.season);
+          setSourceFilename(status.filename || null);
+          setSourceAvailable(true); // if it succeeded, it exists
+        } catch (e) {
+          // ignore if status fails
+        }
       } catch (err) {
         console.error("Init error", err);
         setGroups([]);
@@ -150,20 +157,21 @@ export default function DashboardScreen() {
   }, []);
 
   const filteredGroups = groups.filter(g =>
-    g.toLowerCase().includes(searchTerm.toLowerCase())
+    g.group_code.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  const handleGenerateRoutine = async (group) => {
-    const target = group || selectedGroup;
-    if (!target) return;
+  const handleGenerateRoutine = async (groupCode) => {
+    const code = groupCode || selectedGroup;
+    if (!code) return;
+    const targetGroup = groups.find(g => g.group_code === code);
+    if (!targetGroup) return;
+    
     setLoading(true);
     setHasSearched(true);
     try {
-      const data = await fetchRoutine(target);
-      setRoutine(data.entries || []);
-      if (data.odd_week_dates) setOddDates(data.odd_week_dates);
-      if (data.even_week_dates) setEvenDates(data.even_week_dates);
-      if (data.season) setSeason(data.season);
+      const data = await fetchRoutine(targetGroup.id);
+      setRoutine(data || []);
+      // If we don't have odd/even dates from routine anymore, we just rely on admin status
     } catch (err) {
       console.error("Fetch routine error", err);
       setRoutine([]);
@@ -256,18 +264,18 @@ export default function DashboardScreen() {
                     </div>
                     <div className="overflow-y-auto max-h-48 divide-y divide-slate-50">
                       {filteredGroups.length > 0 ? (
-                        filteredGroups.map((group) => (
+                        filteredGroups.map((gObj) => (
                           <div
-                            key={group}
+                            key={gObj.id}
                             onClick={() => {
-                              setSelectedGroup(group);
+                              setSelectedGroup(gObj.group_code);
                               setIsOpen(false);
                               setSearchTerm('');
-                              handleGenerateRoutine(group);
+                              handleGenerateRoutine(gObj.group_code);
                             }}
                             className="px-4 py-2.5 text-sm hover:bg-indigo-50 text-slate-700 font-medium cursor-pointer transition-colors"
                           >
-                            Section {group}
+                            Section {gObj.group_code}
                           </div>
                         ))
                       ) : (

@@ -123,19 +123,6 @@ async def ingest_excel(
                 "course_code": course_code,
                 "department_id": department_id
             })
-    for g_courses in parsed_data["online_classes"].values():
-        for e in g_courses:
-            course = e.get("course")
-            if not course:
-                continue
-            course_code = course.upper().strip()
-            if course_code in seen_courses:
-                continue
-            seen_courses.add(course_code)
-            courses_data.append({
-                "course_code": course_code,
-                "department_id": department_id
-            })
     if courses_data:
         supabase_client.table("courses").upsert(courses_data, on_conflict="course_code").execute()
 
@@ -160,19 +147,6 @@ async def ingest_excel(
                 "group_code": group_code,
                 "academic_semester": academic_semester
             })
-    for g_code in parsed_data["online_classes"].keys():
-        if not g_code or g_code in seen_groups:
-            continue
-        seen_groups.add(g_code)
-        try:
-            academic_semester = int(g_code[0])
-        except (ValueError, IndexError):
-            academic_semester = 1 # fallback
-        groups_data.append({
-            "department_id": department_id,
-            "group_code": g_code,
-            "academic_semester": academic_semester
-        })
     if groups_data:
         supabase_client.table("groups").upsert(groups_data, on_conflict="department_id,group_code").execute()
 
@@ -189,6 +163,7 @@ async def ingest_excel(
         ts_map[st_db] = ts["id"]
 
     cr_data = []
+    oc_data = []
     for row_idx, (room_str, entries) in enumerate(parsed_data["index"].items()):
         for col_idx, e in enumerate(entries):
             course_code = e.get("course")
@@ -205,39 +180,66 @@ async def ingest_excel(
             room_id = room_map.get(room_name)
             
             day = e.get("day", "").lower()
-            
             st_str = e.get("start_time")
             st_24h = normalize_to_24h(st_str)
             time_slot_id = ts_map.get(st_24h)
             
-            failed = []
-            if not course_id: failed.append(f"course '{course_code}'")
-            if not group_id: failed.append(f"group '{group_code}'")
-            if not teacher_id and teacher_acro: failed.append(f"teacher acronym '{teacher_acro}'")
-            if not room_id and room_name and room_name.lower() != "online": failed.append(f"room '{room_name}'")
-            if not time_slot_id: failed.append(f"time slot '{st_str}'")
-
-            if failed:
-                warnings.append(f"Could not resolve {', '.join(failed)} for entry '{course_code}-{group_code}' at room '{room_name}', slot '{st_str}'")
-                continue
-
-            week_parity = e.get("odd_even")
-            if week_parity:
-                week_parity = week_parity.lower()
-                if week_parity not in ["odd", "even"]:
-                    week_parity = None
+            is_online = (room_name and room_name.lower() == "online") or "online" in e.get("section_type", "").lower()
             
-            cr_data.append({
-                "semester_id": semester_id,
-                "department_id": department_id,
-                "group_id": group_id,
-                "course_id": course_id,
-                "teacher_id": teacher_id,
-                "room_id": room_id,
-                "time_slot_id": time_slot_id,
-                "day_of_week": day,
-                "week_parity": week_parity
-            })
+            if is_online:
+                end_str = e.get("end_time")
+                end_24h = normalize_to_24h(end_str) if end_str else None
+                if st_24h and st_24h.count(":") == 1: st_24h += ":00"
+                if end_24h and end_24h.count(":") == 1: end_24h += ":00"
+                
+                failed = []
+                if not course_id: failed.append(f"course '{course_code}'")
+                if not group_id: failed.append(f"group '{group_code}'")
+                if not teacher_id and teacher_acro: failed.append(f"teacher acronym '{teacher_acro}'")
+                
+                if failed:
+                    warnings.append(f"Could not resolve {', '.join(failed)} for online class '{course_code}-{group_code}'")
+                    continue
+                    
+                oc_data.append({
+                    "semester_id": semester_id,
+                    "department_id": department_id,
+                    "group_id": group_id,
+                    "course_id": course_id,
+                    "teacher_id": teacher_id,
+                    "day_of_week": day,
+                    "time_start": st_24h,
+                    "time_end": end_24h
+                })
+            else:
+                failed = []
+                if not course_id: failed.append(f"course '{course_code}'")
+                if not group_id: failed.append(f"group '{group_code}'")
+                if not teacher_id and teacher_acro: failed.append(f"teacher acronym '{teacher_acro}'")
+                if not room_id: failed.append(f"room '{room_name}'")
+                if not time_slot_id: failed.append(f"time slot '{st_str}'")
+    
+                if failed:
+                    warnings.append(f"Could not resolve {', '.join(failed)} for entry '{course_code}-{group_code}' at room '{room_name}', slot '{st_str}'")
+                    continue
+    
+                week_parity = e.get("odd_even")
+                if week_parity:
+                    week_parity = week_parity.lower()
+                    if week_parity not in ["odd", "even"]:
+                        week_parity = None
+                
+                cr_data.append({
+                    "semester_id": semester_id,
+                    "department_id": department_id,
+                    "group_id": group_id,
+                    "course_id": course_id,
+                    "teacher_id": teacher_id,
+                    "room_id": room_id,
+                    "time_slot_id": time_slot_id,
+                    "day_of_week": day,
+                    "week_parity": week_parity
+                })
 
     cr_inserted = 0
     if cr_data:
@@ -250,49 +252,6 @@ async def ingest_excel(
             else:
                 cr_inserted += len(chunk)
 
-    # 6. Online Classes
-    oc_data = []
-    for g_code, entries in parsed_data["online_classes"].items():
-        group_id = group_map.get(g_code)
-        if not group_id:
-            warnings.append(f"Could not resolve group '{g_code}' for online classes")
-            continue
-            
-        for e in entries:
-            course_code = e.get("course")
-            if course_code: course_code = course_code.upper().strip()
-            course_id = course_map.get(course_code)
-            
-            teacher_acro = e.get("teacher_acro")
-            teacher_id = teacher_map.get(teacher_acro)
-            
-            if not course_id:
-                warnings.append(f"Could not resolve course '{course_code}' for online class in group '{g_code}'")
-                continue
-            if not teacher_id and teacher_acro:
-                warnings.append(f"Could not resolve teacher acronym '{teacher_acro}' for online class in group '{g_code}'")
-                
-            day = e.get("day", "").lower()
-            st_str = e.get("start_time")
-            end_str = e.get("end_time")
-            
-            st_24h = normalize_to_24h(st_str)
-            end_24h = normalize_to_24h(end_str)
-            
-            if st_24h.count(":") == 1: st_24h += ":00"
-            if end_24h.count(":") == 1: end_24h += ":00"
-            
-            oc_data.append({
-                "semester_id": semester_id,
-                "department_id": department_id,
-                "group_id": group_id,
-                "course_id": course_id,
-                "teacher_id": teacher_id,
-                "day_of_week": day,
-                "time_start": st_24h,
-                "time_end": end_24h
-            })
-    
     oc_inserted = 0
     if oc_data:
         chunk_size = 500

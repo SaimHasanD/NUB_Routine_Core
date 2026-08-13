@@ -206,4 +206,53 @@ async def download_source_file():
 # ── Routine by group ──────────────────────────────────────────────────────────
 @app.get("/api/v1/routine/{group_id}")
 async def get_routine(group_id: str):
-    return supabase_client.table("class_routines").select("*").eq("group_id", group_id).execute().data
+    routines = supabase_client.table("class_routines").select("*").eq("group_id", group_id).execute().data
+    
+    if not routines:
+        return []
+
+    course_ids = list({r["course_id"] for r in routines if r.get("course_id")})
+    teacher_ids = list({r["teacher_id"] for r in routines if r.get("teacher_id")})
+    room_ids = list({r["room_id"] for r in routines if r.get("room_id")})
+    time_slot_ids = list({r["time_slot_id"] for r in routines if r.get("time_slot_id")})
+    
+    courses_dict = {}
+    if course_ids:
+        courses = supabase_client.table("courses").select("id, course_code").in_("id", course_ids).execute().data
+        courses_dict = {c["id"]: c for c in courses}
+        
+    teachers_dict = {}
+    if teacher_ids:
+        teachers = supabase_client.table("teachers").select("id, name").in_("id", teacher_ids).execute().data
+        teachers_dict = {t["id"]: t for t in teachers}
+        
+    rooms_dict = {}
+    if room_ids:
+        rooms = supabase_client.table("rooms").select("id, room_code").in_("id", room_ids).execute().data
+        rooms_dict = {r["id"]: r for r in rooms}
+        
+    time_slots_dict = {}
+    if time_slot_ids:
+        time_slots = supabase_client.table("time_slots").select("id, start_time, end_time").in_("id", time_slot_ids).execute().data
+        time_slots_dict = {ts["id"]: ts for ts in time_slots}
+        
+    result = []
+    for r in routines:
+        course = courses_dict.get(r.get("course_id"))
+        teacher = teachers_dict.get(r.get("teacher_id"))
+        room = rooms_dict.get(r.get("room_id"))
+        time_slot = time_slots_dict.get(r.get("time_slot_id"))
+        
+        result.append({
+            "id": r["id"],
+            "day": r["day_of_week"].capitalize() if r.get("day_of_week") else None,
+            "course": course["course_code"] if course else None,
+            "teacher": teacher["name"] if teacher else None,
+            "room": room["room_code"] if room else None,
+            "start_time": time_slot["start_time"] if time_slot else None,
+            "end_time": time_slot["end_time"] if time_slot else None,
+            "odd_even": r.get("week_parity"),
+            "section_type": "Lab" if r.get("week_parity") is not None else "Theory"
+        })
+        
+    return result
