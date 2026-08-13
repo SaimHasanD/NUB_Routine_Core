@@ -93,9 +93,9 @@ export default function UploadScreen() {
     try {
       const data = await uploadExcel(file, password, isReplace);
       setUploadSuccess({
-        message: data.status === 'success' ? 'Routine uploaded successfully!' : (data.message || 'Success'),
-        groupsCount: data.inserted ? data.inserted.groups : 0,
-        totalEntries: data.inserted ? data.inserted.class_routines : 0,
+        message: data.message,
+        groupsCount: data.groups ? data.groups.length : 0,
+        totalEntries: data.total_entries || 0,
       });
       setFile(null);
       // Refresh status after successful upload

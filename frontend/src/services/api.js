@@ -1,6 +1,6 @@
 // API service layer
 
-const BASE_URL = import.meta.env.VITE_API_URL || '/api/v1';
+const BASE_URL = import.meta.env.VITE_API_URL || 'https://nub-routine-core.onrender.com/api/v1';
 
 export async function healthCheck() {
   const res = await fetch(`${BASE_URL}/health`);
@@ -34,11 +34,9 @@ export async function fetchRoutine(groupId) {
 export async function uploadExcel(file, password, replace = false) {
   const formData = new FormData();
   formData.append('file', file);
-  const res = await fetch(`${BASE_URL}/ingest/excel`, { 
-    method: 'POST', 
-    headers: { 'X-Upload-Password': password || '' },
-    body: formData 
-  });
+  formData.append('password', password || '');
+  formData.append('replace', replace ? 'true' : 'false');
+  const res = await fetch(`${BASE_URL}/upload`, { method: 'POST', body: formData });
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));
     throw new Error(detail.detail || `Upload failed (${res.status})`);

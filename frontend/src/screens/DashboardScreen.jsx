@@ -3,7 +3,7 @@ import { Search, ChevronDown, Calendar, BookOpen, FileText, Download, Image as I
 import RoutineTable from '../components/RoutineTable.jsx';
 import RoutinePreviewModal from '../components/RoutinePreviewModal.jsx';
 import RoutineDownloadLayout from '../components/RoutineDownloadLayout.jsx';
-import { healthCheck, fetchGroups, fetchRoutine, getSourceFileUrl, fetchAdminStatus } from '../services/api.js';
+import { healthCheck, fetchGroups, fetchRoutine, getSourceFileUrl } from '../services/api.js';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 import { getCaptureScale, getPdfImageDimensions, waitForExportReady, downloadCanvasAsImage } from '../utils/exportSheet.js';
@@ -132,9 +132,7 @@ export default function DashboardScreen() {
           if (status.season) setSeason(status.season);
           setSourceFilename(status.filename || null);
           setSourceAvailable(true); // if it succeeded, it exists
-        } catch (e) {
-          // ignore if status fails
-        }
+        } catch (e) {}
       } catch (err) {
         console.error("Init error", err);
         setGroups([]);
