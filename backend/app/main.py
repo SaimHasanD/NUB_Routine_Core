@@ -204,6 +204,6 @@ async def download_source_file():
     )
 
 # ── Routine by group ──────────────────────────────────────────────────────────
-@app.get("/api/v1/routine/{group_id}", response_model=GroupRoutineResponse)
+@app.get("/api/v1/routine/{group_id}")
 async def get_routine(group_id: str):
     return supabase_client.table("class_routines").select("*").eq("group_id", group_id).execute().data
