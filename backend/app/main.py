@@ -280,13 +280,16 @@ async def get_routine(group_id: str):
         time_slots_dict = {ts["id"]: ts for ts in time_slots}
 
     theory_rows = []
+    seen_theory_keys = set()
     lab_entries = {}
     
     for r in routines:
+        key = (r.get("day_of_week"), r.get("course_id"), r.get("teacher_id"), r.get("room_id"), r.get("time_slot_id"))
         if r.get("week_parity") is None:
-            theory_rows.append(r)
+            if key not in seen_theory_keys:
+                seen_theory_keys.add(key)
+                theory_rows.append(r)
         else:
-            key = (r.get("day_of_week"), r.get("course_id"), r.get("teacher_id"), r.get("room_id"), r.get("time_slot_id"))
             if key not in lab_entries:
                 lab_entries[key] = {"row": r, "parities": set()}
             lab_entries[key]["parities"].add(r.get("week_parity"))
