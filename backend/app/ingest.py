@@ -76,8 +76,7 @@ async def ingest_excel(
             "name": info.get("name"),
             "acronym": acro,
             "designation": info.get("designation"),
-            "department_name": info.get("department"),
-            "mobile": info.get("mobile"),
+            "mobile_number": info.get("mobile"),
             "email": info.get("email")
         })
     if teachers_data:
