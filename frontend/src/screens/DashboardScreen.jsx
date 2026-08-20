@@ -3,17 +3,14 @@ import { Search, ChevronDown, Calendar, BookOpen, FileText, Download, Image as I
 import RoutineTable from '../components/RoutineTable.jsx';
 import RoutinePreviewModal from '../components/RoutinePreviewModal.jsx';
 import RoutineDownloadLayout from '../components/RoutineDownloadLayout.jsx';
-import { healthCheck, fetchGroups, fetchRoutine, getSourceFileUrl } from '../services/api.js';
+import { healthCheck, fetchGroups, fetchRoutine, getSourceFileUrl, fetchAdminStatus } from '../services/api.js';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 import { getCaptureScale, getPdfImageDimensions, waitForExportReady, downloadCanvasAsImage } from '../utils/exportSheet.js';
-import ExamSchedule from './ExamSchedule.jsx';
-
 
 
 
 export default function DashboardScreen() {
-  const [viewMode, setViewMode] = useState('class'); // 'class' | 'exam'
   const [groups, setGroups] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedGroup, setSelectedGroup] = useState('');
@@ -123,7 +120,7 @@ export default function DashboardScreen() {
       try {
         await healthCheck();
         const data = await fetchGroups();
-        setGroups(data || []);
+        setGroups([...(data || [])].sort((a, b) => a.academic_semester - b.academic_semester || a.group_code.localeCompare(b.group_code)));
         
         // Try to fetch admin status for metadata (title, season, etc.)
         try {
@@ -136,6 +133,7 @@ export default function DashboardScreen() {
       } catch (err) {
         console.error("Init error", err);
         setGroups([]);
+        setTitle("Error: " + err.message);
       } finally {
         setServerWaking(false);
       }
@@ -206,32 +204,7 @@ export default function DashboardScreen() {
         )}
       </div>
 
-      {/* View Toggle */}
-      <div className="flex flex-row gap-3">
-        <button
-          onClick={() => setViewMode('class')}
-          className={`flex-1 px-5 py-3 rounded-xl font-semibold text-sm transition-all ${viewMode === 'class'
-            ? 'bg-indigo-600 text-white shadow-sm'
-            : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'
-            }`}
-        >
-          Class Routine
-        </button>
-        <button
-          onClick={() => setViewMode('exam')}
-          className={`flex-1 px-5 py-3 rounded-xl font-semibold text-sm transition-all ${viewMode === 'exam'
-            ? 'bg-violet-600 text-white shadow-sm'
-            : 'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'
-            }`}
-        >
-          Exam Routine
-        </button>
-      </div>
-
-      {viewMode === 'exam' && <ExamSchedule />}
-
-      {viewMode === 'class' && (
-        <>
+      <>
           {/* Group Selector */}
           <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
             <div className="flex flex-col sm:flex-row gap-4 items-start">
@@ -264,6 +237,7 @@ export default function DashboardScreen() {
                       />
                     </div>
                     <div className="overflow-y-auto max-h-48 divide-y divide-slate-50">
+
                       {filteredGroups.length > 0 ? (
                         filteredGroups.map((gObj) => (
                           <div
@@ -409,7 +383,6 @@ export default function DashboardScreen() {
             </div>
           )}
         </>
-      )}
     </div>
   );
 }

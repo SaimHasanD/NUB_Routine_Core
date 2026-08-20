@@ -5,7 +5,6 @@ from pathlib import Path
 logger = logging.getLogger("uvicorn.error")
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123_nu")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
@@ -24,5 +23,3 @@ if SUPABASE_URL and SUPABASE_KEY:
 # Persistent storage for the single active routine file
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
-
-EXAM_SCHEDULE_FILENAME = "exam_schedule.json"

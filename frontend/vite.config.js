@@ -6,7 +6,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'https://nub-routine-core.onrender.com',
+        target: 'http://localhost:8001',
         changeOrigin: true,
       }
     }

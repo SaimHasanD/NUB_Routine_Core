@@ -50,22 +50,14 @@ export async function uploadExcel(file, password, replace = false) {
   return res.json();
 }
 
-export async function getExamSchedule() {
-  const res = await fetch(`${BASE_URL}/exam`);
-  if (!res.ok) throw new Error('No exam schedule found');
+export async function fetchTeachers() {
+  const res = await fetch(`${BASE_URL}/teachers`);
+  if (!res.ok) throw new Error('Failed to fetch teachers');
   return res.json();
 }
 
-export async function uploadExamSchedule(file, password) {
-  const formData = new FormData();
-  formData.append('file', file);
-  formData.append('password', password || '');
-  const res = await fetch(`${BASE_URL}/exam/upload`, { method: 'POST', body: formData });
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({}));
-    throw new Error(detail.detail || `Upload failed (${res.status})`);
-  }
+export async function fetchTeachersSchedule() {
+  const res = await fetch(`${BASE_URL}/teachers/schedule`);
+  if (!res.ok) throw new Error('Failed to fetch teachers schedule');
   return res.json();
 }
-
-

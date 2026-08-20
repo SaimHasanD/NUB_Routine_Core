@@ -299,7 +299,7 @@ export default function RoutineDownloadLayout({
               <tr key={index}>
                 <td style={tdStyle}>{index + 1}</td>
                 <td style={{ ...timeCellStyle, backgroundColor: rowBg }}>
-                  {entry.start_time} - {entry.end_time}
+                  {entry.start_time?.substring(0, 5)} - {entry.end_time?.substring(0, 5)}
                 </td>
                 <td style={tdStyle}>{entry.room}</td>
                 <td style={tdStyle}>{entry.teacher_acro || 'TBA'}</td>

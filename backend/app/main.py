@@ -30,11 +30,6 @@ except ImportError:
     from shared import ADMIN_PASSWORD, SUPABASE_BUCKET, supabase_client, DATA_DIR, logger
 
 try:
-    from .exam import router as exam_router
-except ImportError:
-    from exam import router as exam_router
-
-try:
     from .parser.time_utils import normalize_to_24h, merge_consecutive_entries
 except ImportError:
     from parser.time_utils import normalize_to_24h, merge_consecutive_entries
@@ -83,7 +78,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(exam_router)
 app.include_router(ingest_router)
 
 # ── Health ────────────────────────────────────────────────────────────────────

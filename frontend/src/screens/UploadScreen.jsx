@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Lock, CheckCircle, AlertCircle, FileSpreadsheet, RefreshCw, Calendar, Layers, Hash, ClipboardList, Image as ImageIcon } from 'lucide-react';
-import { uploadExcel, fetchAdminStatus, uploadExamSchedule, getExamSchedule } from '../services/api.js';
+import { Upload, Lock, CheckCircle, AlertCircle, FileSpreadsheet, RefreshCw, Calendar, Layers, Hash } from 'lucide-react';
+import { uploadExcel, fetchAdminStatus } from '../services/api.js';
 
 const ADMIN_PASSWORD = "admin123_nu";
 
@@ -21,16 +21,6 @@ export default function UploadScreen() {
   const [uploadError, setUploadError] = useState(null);
   const fileInputRef = useRef(null);
 
-  // Exam upload
-  const [examFile, setExamFile] = useState(null);
-  const [examDragActive, setExamDragActive] = useState(false);
-  const [examUploading, setExamUploading] = useState(false);
-  const [examSuccess, setExamSuccess] = useState(null);
-  const [examError, setExamError] = useState(null);
-  const examFileInputRef = useRef(null);
-
-  const [examData, setExamData] = useState(null);
-
   const loadStatus = async () => {
     setStatusLoading(true);
     try {
@@ -38,13 +28,6 @@ export default function UploadScreen() {
       setRoutineStatus(data);
     } catch {
       setRoutineStatus(null);
-    }
-
-    try {
-      const eData = await getExamSchedule();
-      setExamData(eData);
-    } catch {
-      setExamData(null);
     }
 
     setStatusLoading(false);
@@ -105,23 +88,6 @@ export default function UploadScreen() {
       setUploadError(error.message || 'Upload failed.');
     } finally {
       setUploading(false);
-    }
-  };
-
-  const handleExamUpload = async () => {
-    if (!examFile) return;
-    setExamUploading(true);
-    setExamSuccess(null);
-    setExamError(null);
-    try {
-      const data = await uploadExamSchedule(examFile, password);
-      setExamSuccess(`Exam schedule saved — ${data.entries} exam day(s) parsed.`);
-      setExamFile(null);
-    } catch (err) {
-      console.error('Exam upload failed', err);
-      setExamError(err.message || 'Exam upload failed.');
-    } finally {
-      setExamUploading(false);
     }
   };
 
@@ -393,109 +359,6 @@ export default function UploadScreen() {
         )}
       </div>
 
-      {/* ── Exam Schedule Upload Card ── */}
-      <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200">
-        <h2 className="text-lg font-bold text-slate-900 mb-1 flex items-center gap-2">
-          <ClipboardList className="w-5 h-5 text-violet-600" />
-          Exam Schedule
-        </h2>
-        <p className="text-slate-500 text-sm mb-6">
-          Upload a photo, screenshot, or PDF of the exam schedule.
-          Gemini Vision will extract and structure the data automatically.
-        </p>
-
-        {examData?.image_url && (
-          <div className="mb-6 p-4 bg-slate-50 border border-slate-100 rounded-xl">
-            <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">
-              Currently Active
-            </h3>
-            <div className="aspect-video relative rounded-lg overflow-hidden border border-slate-200 shadow-sm bg-white flex items-center justify-center">
-              <img
-                src={examData.image_url}
-                alt="Active Exam Schedule"
-                className="max-w-full max-h-full object-contain"
-              />
-            </div>
-            <p className="text-xs text-slate-400 mt-2 text-center">
-              Showing {examData.schedule?.length || 0} exam slot(s)
-            </p>
-          </div>
-        )}
-
-        {/* Drag & Drop zone */}
-        <div
-          onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setExamDragActive(true); }}
-          onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setExamDragActive(true); }}
-          onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); setExamDragActive(false); }}
-          onDrop={(e) => {
-            e.preventDefault(); e.stopPropagation(); setExamDragActive(false);
-            if (e.dataTransfer.files?.[0]) setExamFile(e.dataTransfer.files[0]);
-          }}
-          onClick={() => examFileInputRef.current.click()}
-          className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all ${examDragActive
-            ? 'border-violet-600 bg-violet-50/50'
-            : 'border-slate-300 hover:border-slate-400 bg-slate-50'
-            }`}
-        >
-          <input
-            ref={examFileInputRef}
-            type="file"
-            className="hidden"
-            accept="image/*,.pdf"
-            onChange={(e) => { if (e.target.files?.[0]) setExamFile(e.target.files[0]); }}
-          />
-          <ImageIcon className="w-10 h-10 text-slate-400 mx-auto mb-4" />
-          {examFile ? (
-            <p className="text-violet-600 font-medium text-sm">{examFile.name}</p>
-          ) : (
-            <div>
-              <p className="text-slate-700 font-medium">Click to upload or drag &amp; drop</p>
-              <p className="text-xs text-slate-400 mt-1">PNG, JPG, PDF — first page used for PDF</p>
-            </div>
-          )}
-        </div>
-
-        {/* Upload button */}
-        {/* <button
-          onClick={handleExamUpload}
-          disabled={!examFile || examUploading}
-          className={`w-full mt-6 py-3 font-medium rounded-xl transition-all shadow-sm flex justify-center items-center gap-2 ${examFile && !examUploading
-              ? 'bg-violet-600 hover:bg-violet-700 text-white'
-              : 'bg-slate-100 text-slate-400 cursor-not-allowed'
-            }`}
-        >
-          {examUploading ? (
-            <div className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-          ) : (
-            <>
-              <Upload className="w-4 h-4" />
-              Upload &amp; Process Exam Schedule
-            </>
-          )}
-        </button> */}
-
-        {/* Success */}
-        {examSuccess && (
-          <div className="mt-6 border border-emerald-200 bg-emerald-50 rounded-xl p-4 flex items-start gap-3">
-            <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
-            <div>
-              <h4 className="font-bold text-emerald-900 text-sm">Exam Schedule Uploaded!</h4>
-              <p className="text-emerald-700 text-xs mt-0.5">{examSuccess}</p>
-            </div>
-          </div>
-        )}
-
-        {/* Error */}
-        {examError && (
-          <div className="mt-6 border border-rose-200 bg-rose-50 rounded-xl p-4 flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-rose-600 flex-shrink-0 mt-0.5" />
-            <div>
-              <h4 className="font-bold text-rose-900 text-sm">Upload Failed!</h4>
-              <p className="text-rose-700 text-xs mt-0.5">{examError}</p>
-            </div>
-          </div>
-        )}
-      </div>
     </div>
   );
 }

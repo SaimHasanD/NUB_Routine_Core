@@ -66,7 +66,7 @@ export default function RoutineTable({ routine, selectedGroup }) {
                         <div className="flex items-center justify-between gap-1.5 text-xs font-semibold mb-2">
                           <div className="flex items-center gap-1 text-indigo-600">
                             <Clock className="w-3.5 h-3.5" />
-                            <span>{cls.start_time} – {cls.end_time}</span>
+                            <span>{cls.start_time?.substring(0, 5)} – {cls.end_time?.substring(0, 5)}</span>
                           </div>
                           {isLab && (
                             <span className="text-[10px] uppercase bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-md font-bold tracking-wide">
